@@ -1,0 +1,239 @@
+"""Training script for DQN and PPO robot navigation agents."""
+
+import argparse
+import os
+import random
+import time
+
+import numpy as np
+import torch
+import yaml
+from torch.utils.tensorboard import SummaryWriter
+
+from agents.dqn import DQNAgent
+from agents.ppo import PPOAgent
+from envs.grid_nav_env import GridNavEnv
+
+
+def get_device(requested: str) -> str:
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    return requested
+
+
+def evaluate(env: GridNavEnv, agent, algo: str, num_episodes: int = 10) -> tuple:
+    """Run evaluation episodes. Returns (mean_reward, success_rate)."""
+    rewards, successes = [], 0
+    for _ in range(num_episodes):
+        state, _ = env.reset()
+        ep_reward = 0.0
+        done = truncated = False
+        while not (done or truncated):
+            if algo == "dqn":
+                action = agent.select_action(state, greedy=True)
+            else:
+                action, _, _ = agent.select_action(state)
+            state, reward, done, truncated, info = env.step(action)
+            ep_reward += reward
+        rewards.append(ep_reward)
+        if info.get("success", False):
+            successes += 1
+    return float(np.mean(rewards)), successes / num_episodes
+
+
+# ──────────────────────────────────────────────────────────────────
+# DQN Training
+# ──────────────────────────────────────────────────────────────────
+
+def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
+    dqn_cfg = cfg["dqn"]
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    agent = DQNAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        lr=dqn_cfg["lr"],
+        gamma=dqn_cfg["gamma"],
+        buffer_size=int(dqn_cfg["buffer_size"]),
+        batch_size=dqn_cfg["batch_size"],
+        tau=dqn_cfg["tau"],
+        eps_start=dqn_cfg["eps_start"],
+        eps_end=dqn_cfg["eps_end"],
+        eps_decay_steps=dqn_cfg["eps_decay_steps"],
+        device=device,
+    )
+
+    best_reward = -float("inf")
+    total_steps = 0
+    warmup = 1000
+
+    for ep in range(1, dqn_cfg["total_episodes"] + 1):
+        state, _ = env.reset()
+        ep_reward = 0.0
+        ep_steps = 0
+        done = truncated = False
+
+        while not (done or truncated):
+            action = agent.select_action(state)
+            next_state, reward, done, truncated, _ = env.step(action)
+            agent.store_transition(state, action, reward, next_state, done)
+            state = next_state
+            ep_reward += reward
+            ep_steps += 1
+            total_steps += 1
+
+            if total_steps > warmup:
+                loss = agent.update()
+                if loss is not None and total_steps % 100 == 0:
+                    writer.add_scalar("Loss/DQN", loss, total_steps)
+
+        writer.add_scalar("Reward/Episode", ep_reward, ep)
+        writer.add_scalar("Steps/Episode", ep_steps, ep)
+        writer.add_scalar("Epsilon", agent.epsilon, ep)
+
+        if ep % 10 == 0:
+            print(
+                f"[DQN] Ep {ep:>5d}/{dqn_cfg['total_episodes']}  "
+                f"R={ep_reward:>7.1f}  Steps={ep_steps:>4d}  "
+                f"eps={agent.epsilon:.3f}"
+            )
+
+        if ep % dqn_cfg["eval_interval"] == 0:
+            mean_r, suc = evaluate(env, agent, "dqn")
+            print(f"       ➜ Eval  mean_R={mean_r:.1f}  success={suc*100:.0f}%")
+            writer.add_scalar("Reward/Eval", mean_r, ep)
+            writer.add_scalar("Success/Eval", suc, ep)
+            if mean_r > best_reward:
+                best_reward = mean_r
+                agent.save(os.path.join(cfg["training"]["save_dir"], "best_dqn.pth"))
+
+    agent.save(os.path.join(cfg["training"]["save_dir"], "final_dqn.pth"))
+    print(f"[DQN] Training complete. Best eval reward: {best_reward:.1f}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# PPO Training
+# ──────────────────────────────────────────────────────────────────
+
+def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
+    ppo_cfg = cfg["ppo"]
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        lr=ppo_cfg["lr"],
+        gamma=ppo_cfg["gamma"],
+        gae_lambda=ppo_cfg["gae_lambda"],
+        clip_epsilon=ppo_cfg["clip_epsilon"],
+        entropy_coef=ppo_cfg["entropy_coef"],
+        value_coef=ppo_cfg["value_coef"],
+        n_epochs=ppo_cfg["n_epochs"],
+        batch_size=ppo_cfg["batch_size"],
+        device=device,
+    )
+
+    best_reward = -float("inf")
+    total_steps = 0
+    total_timesteps = ppo_cfg["total_timesteps"]
+    rollout_steps = ppo_cfg["rollout_steps"]
+    n_updates = 0
+
+    while total_steps < total_timesteps:
+        state, _ = env.reset()
+        agent.buffer.reset()
+
+        for _ in range(rollout_steps):
+            action, log_prob, value = agent.select_action(state)
+            next_state, reward, done, truncated, _ = env.step(action)
+
+            agent.buffer.add(state, action, log_prob, reward, value, done or truncated)
+            state = next_state
+            total_steps += 1
+
+            if done or truncated:
+                state, _ = env.reset()
+
+        last_value = agent.get_value(state)
+        agent.buffer.compute_returns_and_advantages(
+            last_value, ppo_cfg["gamma"], ppo_cfg["gae_lambda"]
+        )
+        p_loss, v_loss = agent.update()
+        n_updates += 1
+
+        writer.add_scalar("Loss/Policy", p_loss, total_steps)
+        writer.add_scalar("Loss/Value", v_loss, total_steps)
+
+        if total_steps % ppo_cfg["eval_interval"] < rollout_steps:
+            mean_r, suc = evaluate(env, agent, "ppo")
+            pct = total_steps / total_timesteps * 100
+            print(
+                f"[PPO] Step {total_steps:>7d}/{total_timesteps} ({pct:.0f}%)  "
+                f"Eval R={mean_r:.1f}  success={suc*100:.0f}%"
+            )
+            writer.add_scalar("Reward/Eval", mean_r, total_steps)
+            writer.add_scalar("Success/Eval", suc, total_steps)
+            if mean_r > best_reward:
+                best_reward = mean_r
+                agent.save(os.path.join(cfg["training"]["save_dir"], "best_ppo.pth"))
+
+    agent.save(os.path.join(cfg["training"]["save_dir"], "final_ppo.pth"))
+    print(f"[PPO] Training complete. Best eval reward: {best_reward:.1f}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Train RL navigation agent")
+    parser.add_argument("--algo", type=str, default="dqn", choices=["dqn", "ppo"])
+    parser.add_argument("--config", type=str, default="configs/default.yaml")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--episodes", type=int, default=None, help="DQN episodes")
+    parser.add_argument("--timesteps", type=int, default=None, help="PPO timesteps")
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    if args.seed is not None:
+        cfg["training"]["seed"] = args.seed
+    if args.episodes is not None:
+        cfg["dqn"]["total_episodes"] = args.episodes
+    if args.timesteps is not None:
+        cfg["ppo"]["total_timesteps"] = args.timesteps
+
+    seed = cfg["training"]["seed"]
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    device = get_device(args.device)
+    print(f"Device: {device}  |  Algo: {args.algo}  |  Seed: {seed}")
+
+    os.makedirs(cfg["training"]["log_dir"], exist_ok=True)
+    os.makedirs(cfg["training"]["save_dir"], exist_ok=True)
+
+    env = GridNavEnv(**cfg["environment"])
+    run_name = f"{args.algo}_{int(time.time())}"
+    writer = SummaryWriter(log_dir=os.path.join(cfg["training"]["log_dir"], run_name))
+
+    if args.algo == "dqn":
+        train_dqn(env, cfg, device, writer)
+    else:
+        train_ppo(env, cfg, device, writer)
+
+    writer.close()
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()

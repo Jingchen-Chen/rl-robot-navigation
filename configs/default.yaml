@@ -1,0 +1,44 @@
+# RL Robot Navigation — Default Configuration
+
+environment:
+  grid_size: 10
+  obstacle_ratio: 0.2
+  max_steps: 200
+  render_mode: null  # Set to "human" for visualization
+
+dqn:
+  lr: 0.001
+  gamma: 0.99
+  buffer_size: 100000
+  batch_size: 64
+  tau: 0.005
+  eps_start: 1.0
+  eps_end: 0.01
+  eps_decay_steps: 10000
+  total_episodes: 1000
+  eval_interval: 50
+  target_update_freq: 10
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  n_epochs: 4
+  batch_size: 64
+  rollout_steps: 2048
+  total_timesteps: 500000
+  eval_interval: 10000
+
+training:
+  seed: 42
+  device: "auto"  # auto, cpu, cuda, mps
+  log_dir: "runs"
+  save_dir: "checkpoints"
+
+evaluation:
+  num_episodes: 20
+  render: true
+  save_video: false
