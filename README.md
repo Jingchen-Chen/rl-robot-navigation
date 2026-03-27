@@ -6,7 +6,7 @@
 
 Deep Reinforcement Learning for 2D Robot Navigation using **DQN** and **PPO**.
 
-A mobile robot learns to navigate from a random start to a goal in a grid world with obstacles — implemented as part of the **Mobile Robotics M.Sc.** curriculum at the University of Bonn.
+A mobile robot learns to navigate from a random start to a goal in a grid world with obstacles.
 
 ## Overview
 
@@ -64,7 +64,7 @@ $$y_i = r + \gamma \max_{a'} Q(s', a'; \theta^-)$$
 
 $$\mathcal{L}(\theta) = \mathbb{E}\left[(y_i - Q(s, a; \theta))^2\right]$$
 
-Key techniques: experience replay buffer, target network (soft update $\tau = 0.005$), linear $\varepsilon$-greedy decay.
+Key techniques: experience replay buffer, target network (soft update $\tau = 0.01$), linear $\varepsilon$-greedy decay.
 
 ### Proximal Policy Optimization (PPO)
 
@@ -96,12 +96,12 @@ $$\hat{A}_t = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \quad \delta_
 │                   GridNavEnv                           │
 │  ┌─────┬─────┬─────┬─────┐                            │
 │  │  S  │     │  #  │     │   S = Start (agent)        │
-│  ├─────┼─────┼─────┼─────┤   G = Goal                │
-│  │     │  #  │     │     │   # = Obstacle             │
+│  ├─────┼─────┼─────┼─────┤   G = Goal                 │
+│  │     │  #  │     │     │   # = Obstacle              │
 │  ├─────┼─────┼─────┼─────┤                            │
-│  │  #  │     │     │  #  │   Actions: ↑ ↓ ← →        │
-│  ├─────┼─────┼─────┼─────┤   Obs: flattened grid      │
-│  │     │     │  #  │  G  │   Rewards: +100, -10, -1   │
+│  │  #  │     │     │  #  │   Actions: ↑ ↓ ← →         │
+│  ├─────┼─────┼─────┼─────┤   Obs: 3-channel flat vec  │
+│  │     │     │  #  │  G  │   Rewards: +100, -5, -1    │
 │  └─────┴─────┴─────┴─────┘                            │
 └────────────────────────────────────────────────────────┘
 ```
@@ -119,10 +119,10 @@ pip install -r requirements.txt
 ### Training
 
 ```bash
-# Train DQN agent (1000 episodes)
+# Train DQN agent (600 episodes)
 python train.py --algo dqn
 
-# Train PPO agent (500k timesteps)
+# Train PPO agent (300k timesteps)
 python train.py --algo ppo
 
 # Custom settings
@@ -155,12 +155,12 @@ python -m pytest tests/ -v
 
 | Property | Value |
 |----------|-------|
-| Grid size | 10×10 (configurable) |
-| Obstacle ratio | 20% (configurable) |
-| Observation | Flattened grid vector (100-dim), values: 0=free, 1=obstacle, 2=agent, 3=goal |
+| Grid size | 8×8 (configurable) |
+| Obstacle ratio | 15% (configurable) |
+| Observation | 3-channel flattened vector (192-dim): obstacle / agent / goal planes |
 | Actions | Discrete(4): Up, Down, Left, Right |
 | Reward: reach goal | +100 |
-| Reward: hit wall/obstacle | −10 |
+| Reward: hit wall/obstacle | −5 + distance shaping |
 | Reward: each step | −1 + distance shaping |
 | Max steps | 200 |
 | Map generation | Random with BFS solvability guarantee |
@@ -171,23 +171,32 @@ All hyperparameters are in [`configs/default.yaml`](configs/default.yaml). Key s
 
 | Parameter | DQN | PPO |
 |-----------|-----|-----|
-| Learning rate | 1e-3 | 3e-4 |
+| Learning rate | 5e-4 | 3e-4 |
 | Discount (γ) | 0.99 | 0.99 |
-| Batch size | 64 | 64 |
-| Buffer size | 100,000 | 2,048 (rollout) |
-| ε-decay steps | 10,000 | — |
+| Batch size | 64 | 128 |
+| Buffer size | 50,000 | 1,024 (rollout) |
+| ε-decay steps | 30,000 | — |
 | Clip ε | — | 0.2 |
 | GAE λ | — | 0.95 |
-| Entropy coef | — | 0.01 |
+| Entropy coef | — | 0.02 |
+| Update epochs | — | 8 |
 
 ## Results
 
-| Algorithm | Mean Reward | Success Rate | Mean Steps |
-|-----------|-------------|--------------|------------|
-| DQN | TBD | TBD | TBD |
-| PPO | TBD | TBD | TBD |
+Evaluated on 20 held-out episodes after training (seed 42, 8×8 grid, 15% obstacles).
 
-> Train both algorithms and compare with `tensorboard --logdir runs/`
+| Algorithm | Training Budget | Mean Reward | Std Reward | Success Rate | Mean Steps |
+|-----------|----------------|-------------|------------|--------------|------------|
+| **DQN** | 600 episodes | **90.79** | 0.00 | **100%** | **11.0** |
+| **PPO** | 300k timesteps | 50.94 | 35.06 | 100% | 26.6 |
+
+**Key observations:**
+
+- **DQN** converges faster and more stably on this environment, reaching 100% success by episode ~50 and consistently finding near-optimal paths (avg 11 steps vs. BFS-optimal ~9–12).
+- **PPO** also achieves 100% success but with higher variance and longer paths, reflecting the on-policy sample efficiency gap on a relatively small discrete action space.
+- PPO training exhibits periodic reward drops (catastrophic forgetting pattern), while DQN's off-policy replay buffer provides more stable gradient updates.
+
+> Reproduce results: `python train.py --algo dqn --seed 42` then `python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth`
 
 ## License
 
@@ -195,6 +204,5 @@ All hyperparameters are in [`configs/default.yaml`](configs/default.yaml). Key s
 
 ## Acknowledgments
 
-- **University of Bonn** — M.Sc. Mobile Robotics
 - [Gymnasium](https://gymnasium.farama.org/) — RL environment toolkit
 - [PyTorch](https://pytorch.org/) — deep learning framework

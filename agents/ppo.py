@@ -47,8 +47,8 @@ class PPOAgent:
         """Returns (action, log_prob, value)."""
         state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
-            probs, value = self.policy(state_t)
-            dist = Categorical(probs)
+            logits, value = self.policy(state_t)
+            dist = Categorical(logits=logits)
             action = dist.sample()
         return action.item(), dist.log_prob(action).item(), value.item()
 
@@ -71,9 +71,9 @@ class PPOAgent:
                 # normalize advantages
                 adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                probs, values = self.policy(states)
+                logits, values = self.policy(states)
                 values = values.squeeze(-1)
-                dist = Categorical(probs)
+                dist = Categorical(logits=logits)
                 new_lp = dist.log_prob(actions)
                 entropy = dist.entropy().mean()
 

@@ -53,6 +53,7 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
     dqn_cfg = cfg["dqn"]
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
+    warmup = dqn_cfg.get("warmup_steps", 2000)
 
     agent = DQNAgent(
         state_dim=state_dim,
@@ -70,12 +71,18 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
 
     best_reward = -float("inf")
     total_steps = 0
-    warmup = 1000
+    recent_rewards = []
 
+    seed = cfg["training"]["seed"]
     for ep in range(1, dqn_cfg["total_episodes"] + 1):
-        state, _ = env.reset()
+        # 只有在第一个 episode 时传入 seed 以初始化固定的地图
+        if ep == 1:
+            state, _ = env.reset(seed=seed)
+        else:
+            state, _ = env.reset()
         ep_reward = 0.0
         ep_steps = 0
+        ep_losses = []
         done = truncated = False
 
         while not (done or truncated):
@@ -89,18 +96,27 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
 
             if total_steps > warmup:
                 loss = agent.update()
-                if loss is not None and total_steps % 100 == 0:
-                    writer.add_scalar("Loss/DQN", loss, total_steps)
+                if loss is not None:
+                    ep_losses.append(loss)
+
+        recent_rewards.append(ep_reward)
+        if len(recent_rewards) > 50:
+            recent_rewards.pop(0)
+        avg_reward = np.mean(recent_rewards)
 
         writer.add_scalar("Reward/Episode", ep_reward, ep)
+        writer.add_scalar("Reward/Rolling50", avg_reward, ep)
         writer.add_scalar("Steps/Episode", ep_steps, ep)
         writer.add_scalar("Epsilon", agent.epsilon, ep)
+        if ep_losses:
+            writer.add_scalar("Loss/DQN", np.mean(ep_losses), ep)
 
         if ep % 10 == 0:
+            avg_loss = f"{np.mean(ep_losses):.4f}" if ep_losses else "warmup"
             print(
-                f"[DQN] Ep {ep:>5d}/{dqn_cfg['total_episodes']}  "
-                f"R={ep_reward:>7.1f}  Steps={ep_steps:>4d}  "
-                f"eps={agent.epsilon:.3f}"
+                f"[DQN] Ep {ep:>4d}/{dqn_cfg['total_episodes']}  "
+                f"R={ep_reward:>7.1f}  Avg50={avg_reward:>7.1f}  "
+                f"Steps={ep_steps:>4d}  eps={agent.epsilon:.3f}  loss={avg_loss}"
             )
 
         if ep % dqn_cfg["eval_interval"] == 0:
@@ -113,7 +129,7 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
                 agent.save(os.path.join(cfg["training"]["save_dir"], "best_dqn.pth"))
 
     agent.save(os.path.join(cfg["training"]["save_dir"], "final_dqn.pth"))
-    print(f"[DQN] Training complete. Best eval reward: {best_reward:.1f}")
+    print(f"\n[DQN] Training complete. Best eval reward: {best_reward:.1f}")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -143,10 +159,12 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
     total_steps = 0
     total_timesteps = ppo_cfg["total_timesteps"]
     rollout_steps = ppo_cfg["rollout_steps"]
-    n_updates = 0
+    recent_rewards: list = []
+
+    state, _ = env.reset(seed=cfg["training"]["seed"])
+    ep_reward = 0.0
 
     while total_steps < total_timesteps:
-        state, _ = env.reset()
         agent.buffer.reset()
 
         for _ in range(rollout_steps):
@@ -155,9 +173,14 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
 
             agent.buffer.add(state, action, log_prob, reward, value, done or truncated)
             state = next_state
+            ep_reward += reward
             total_steps += 1
 
             if done or truncated:
+                recent_rewards.append(ep_reward)
+                if len(recent_rewards) > 20:
+                    recent_rewards.pop(0)
+                ep_reward = 0.0
                 state, _ = env.reset()
 
         last_value = agent.get_value(state)
@@ -165,18 +188,23 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
             last_value, ppo_cfg["gamma"], ppo_cfg["gae_lambda"]
         )
         p_loss, v_loss = agent.update()
-        n_updates += 1
 
         writer.add_scalar("Loss/Policy", p_loss, total_steps)
         writer.add_scalar("Loss/Value", v_loss, total_steps)
+        if recent_rewards:
+            avg_r = np.mean(recent_rewards)
+            writer.add_scalar("Reward/Rolling20", avg_r, total_steps)
+
+        pct = total_steps / total_timesteps * 100
+        avg_str = f"{np.mean(recent_rewards):.1f}" if recent_rewards else "n/a"
+        print(
+            f"[PPO] {total_steps:>7d}/{total_timesteps} ({pct:4.1f}%)  "
+            f"AvgR={avg_str:>7s}  p_loss={p_loss:.4f}  v_loss={v_loss:.4f}"
+        )
 
         if total_steps % ppo_cfg["eval_interval"] < rollout_steps:
             mean_r, suc = evaluate(env, agent, "ppo")
-            pct = total_steps / total_timesteps * 100
-            print(
-                f"[PPO] Step {total_steps:>7d}/{total_timesteps} ({pct:.0f}%)  "
-                f"Eval R={mean_r:.1f}  success={suc*100:.0f}%"
-            )
+            print(f"       ➜ Eval  mean_R={mean_r:.1f}  success={suc*100:.0f}%")
             writer.add_scalar("Reward/Eval", mean_r, total_steps)
             writer.add_scalar("Success/Eval", suc, total_steps)
             if mean_r > best_reward:
@@ -184,7 +212,7 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
                 agent.save(os.path.join(cfg["training"]["save_dir"], "best_ppo.pth"))
 
     agent.save(os.path.join(cfg["training"]["save_dir"], "final_ppo.pth"))
-    print(f"[PPO] Training complete. Best eval reward: {best_reward:.1f}")
+    print(f"\n[PPO] Training complete. Best eval reward: {best_reward:.1f}")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -197,8 +225,8 @@ def main():
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--episodes", type=int, default=None, help="DQN episodes")
-    parser.add_argument("--timesteps", type=int, default=None, help="PPO timesteps")
+    parser.add_argument("--episodes", type=int, default=None, help="DQN episodes override")
+    parser.add_argument("--timesteps", type=int, default=None, help="PPO timesteps override")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -232,6 +260,7 @@ def main():
         train_ppo(env, cfg, device, writer)
 
     writer.close()
+    env.close()
     print("Done.")
 
 

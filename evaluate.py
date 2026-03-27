@@ -84,6 +84,10 @@ def main():
 
     rewards, steps_list, successes = [], [], 0
     trajectories = []
+    
+    # [新增] 强制使用训练时的 seed 初始化地图
+    seed = cfg["training"]["seed"]
+    env.reset(seed=seed) 
 
     for ep in range(args.num_episodes):
         r, s, suc, frames = run_episode(env, agent, args.algo, args.render)

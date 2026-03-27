@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Tuple
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import numpy as np
 
 
@@ -21,37 +20,45 @@ class GridNavEnv(gym.Env):
 
     Rewards:
         +100  reach the goal
-        -10   hit wall or obstacle
-        -1    each step
-        +1    getting closer to goal (Manhattan distance shaping)
+        -5    hit wall or obstacle (reduced from -10 to avoid exploding negatives)
+        -1    each step (time penalty)
+        +/-F  potential-based distance shaping (F = -manhattan / max_dist)
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
 
     def __init__(
         self,
-        grid_size: int = 10,
-        obstacle_ratio: float = 0.2,
+        grid_size: int = 8,
+        obstacle_ratio: float = 0.15,
         max_steps: int = 200,
         render_mode: Optional[str] = None,
+        fixed_map: bool = False,
     ):
         super().__init__()
         self.grid_size = grid_size
         self.obstacle_ratio = obstacle_ratio
         self.max_steps = max_steps
         self.render_mode = render_mode
+        self.fixed_map = fixed_map  # if True, reuse the same map across resets
 
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(
-            low=0, high=3, shape=(grid_size * grid_size,), dtype=np.float32
+            low=0.0, high=1.0, shape=(grid_size * grid_size * 3,), dtype=np.float32
         )
 
         self.grid: Optional[np.ndarray] = None
+        self._fixed_grid: Optional[np.ndarray] = None
+        self._fixed_start: Optional[Tuple[int, int]] = None
+        self._fixed_goal: Optional[Tuple[int, int]] = None
+
         self.agent_pos: Optional[Tuple[int, int]] = None
         self.goal_pos: Optional[Tuple[int, int]] = None
         self.steps = 0
-        self._prev_dist: Optional[int] = None
+        self._prev_potential: float = 0.0
         self._fig = None
+
+        self._max_dist = float(2 * (grid_size - 1))
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -64,8 +71,20 @@ class GridNavEnv(gym.Env):
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
         self.steps = 0
-        self._generate_solvable_map()
-        self._prev_dist = self._manhattan()
+
+        if self.fixed_map and self._fixed_grid is not None:
+            # reuse the pre-generated map, only reset agent position
+            self.grid = self._fixed_grid.copy()
+            self.agent_pos = self._fixed_start
+            self.goal_pos = self._fixed_goal
+        else:
+            self._generate_solvable_map()
+            if self.fixed_map:
+                self._fixed_grid = self.grid.copy()
+                self._fixed_start = self.agent_pos
+                self._fixed_goal = self.goal_pos
+
+        self._prev_potential = self._potential(self.agent_pos)
         return self._get_obs(), {"agent_pos": self.agent_pos, "goal_pos": self.goal_pos}
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
@@ -77,20 +96,27 @@ class GridNavEnv(gym.Env):
         terminated = False
         truncated = self.steps >= self.max_steps
 
+        collision = False
         if not (0 <= nr < self.grid_size and 0 <= nc < self.grid_size):
-            reward = -10.0  # hit wall
+            collision = True  # hit wall
         elif self.grid[nr, nc] == 1:
-            reward = -10.0  # hit obstacle
+            collision = True  # hit obstacle
         else:
             self.agent_pos = (nr, nc)
             if self.agent_pos == self.goal_pos:
-                reward = 100.0
                 terminated = True
-            else:
-                curr_dist = self._manhattan()
-                # reward shaping: +1 closer, 0 same, -1 farther
-                reward = -1.0 + float(self._prev_dist - curr_dist)
-                self._prev_dist = curr_dist
+
+        # Potential-based reward shaping (F(s') - F(s)), always computed
+        new_potential = self._potential(self.agent_pos)
+        shaping = new_potential - self._prev_potential
+        self._prev_potential = new_potential
+
+        if terminated:
+            reward = 100.0 + shaping
+        elif collision:
+            reward = -5.0 + shaping  # mild collision penalty, shaping still applies
+        else:
+            reward = -1.0 + shaping
 
         info = {
             "agent_pos": self.agent_pos,
@@ -108,7 +134,7 @@ class GridNavEnv(gym.Env):
                 self._fig, self._ax = plt.subplots(1, 1, figsize=(5, 5))
                 plt.ion()
             self._ax.clear()
-            self._ax.imshow(grid_rgb)
+            self._ax.imshow(grid_rgb, interpolation="nearest")
             self._ax.set_title(f"Step {self.steps}")
             self._ax.axis("off")
             plt.pause(0.05)
@@ -122,6 +148,11 @@ class GridNavEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _potential(self, pos: Tuple[int, int]) -> float:
+        """Potential function: -manhattan_distance / max_possible_distance."""
+        dist = abs(pos[0] - self.goal_pos[0]) + abs(pos[1] - self.goal_pos[1])
+        return -dist / self._max_dist
 
     def _generate_solvable_map(self):
         """Generate a random grid that is guaranteed solvable (BFS check)."""
@@ -168,20 +199,18 @@ class GridNavEnv(gym.Env):
     # kept for backward compatibility with tests
     is_solvable = _bfs_reachable
 
-    def _manhattan(self) -> int:
-        return abs(self.agent_pos[0] - self.goal_pos[0]) + abs(
-            self.agent_pos[1] - self.goal_pos[1]
-        )
-
     def _get_obs(self) -> np.ndarray:
-        obs = self.grid.copy().astype(np.float32)
-        obs[self.agent_pos] = 2.0
-        obs[self.goal_pos] = 3.0
-        return obs.flatten()
+        """Three-channel encoding: obstacle / agent / goal planes."""
+        obstacle_plane = (self.grid == 1).astype(np.float32)
+        agent_plane = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        agent_plane[self.agent_pos] = 1.0
+        goal_plane = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        goal_plane[self.goal_pos] = 1.0
+        return np.stack([obstacle_plane, agent_plane, goal_plane], axis=0).flatten()
 
     def _build_rgb(self) -> np.ndarray:
         """Build an RGB image of the current grid state."""
-        img = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
+        img = np.full((self.grid_size, self.grid_size, 3), 240, dtype=np.uint8)
         img[self.grid == 1] = [40, 40, 40]       # obstacles – dark grey
         img[self.agent_pos] = [46, 134, 222]      # agent – blue
         img[self.goal_pos] = [39, 174, 96]        # goal – green
