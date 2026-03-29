@@ -163,7 +163,7 @@ python -m pytest tests/ -v
 | Reward: hit wall/obstacle | −5 + distance shaping |
 | Reward: each step | −1 + distance shaping |
 | Max steps | 200 |
-| Map generation | Random with BFS solvability guarantee |
+| Map generation | Random with BFS solvability guarantee (default: `fixed_map: true` — a single map is generated once and reused across all episodes; set to `false` for random maps per episode) |
 
 ## Configuration
 
@@ -183,7 +183,9 @@ All hyperparameters are in [`configs/default.yaml`](configs/default.yaml). Key s
 
 ## Results
 
-Evaluated on 20 held-out episodes after training (seed 42, 8×8 grid, 15% obstacles).
+Evaluated on 20 episodes after training (seed 42, 8×8 grid, 15% obstacles, **`fixed_map: true`**).
+
+> **Note:** The default configuration uses `fixed_map: true`, meaning a single map is generated at the start and reused for all training and evaluation episodes. The agent only needs to memorize one optimal path rather than generalize across random layouts. Results below reflect this single-map setting and are **not** indicative of generalization to unseen maps.
 
 | Algorithm | Training Budget | Mean Reward | Std Reward | Success Rate | Mean Steps |
 |-----------|----------------|-------------|------------|--------------|------------|
@@ -192,9 +194,10 @@ Evaluated on 20 held-out episodes after training (seed 42, 8×8 grid, 15% obstac
 
 **Key observations:**
 
-- **DQN** converges faster and more stably on this environment, reaching 100% success by episode ~50 and consistently finding near-optimal paths (avg 11 steps vs. BFS-optimal ~9–12).
+- **DQN** converges faster and more stably on this fixed-map setting, reaching 100% success by episode ~50 and consistently finding near-optimal paths (avg 11 steps vs. BFS-optimal ~9–12). The zero standard deviation confirms that DQN has memorized the single optimal trajectory.
 - **PPO** also achieves 100% success but with higher variance and longer paths, reflecting the on-policy sample efficiency gap on a relatively small discrete action space.
 - PPO training exhibits periodic reward drops (catastrophic forgetting pattern), while DQN's off-policy replay buffer provides more stable gradient updates.
+- To evaluate generalization, set `fixed_map: false` in [`configs/default.yaml`](configs/default.yaml) — expect lower success rates and higher variance as the agent must handle novel obstacle layouts.
 
 > Reproduce results: `python train.py --algo dqn --seed 42` then `python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth`
 
