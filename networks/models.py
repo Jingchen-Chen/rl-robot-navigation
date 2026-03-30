@@ -130,3 +130,94 @@ class ActorCritic(nn.Module):
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         _, value = self.forward(obs)
         return value
+
+
+class ConvActorCritic(nn.Module):
+    """CNN-based Actor-Critic for PPO — treats the grid as a 2D image.
+
+    The observation is expected to be a flat vector of shape
+    (grid_size * grid_size * 3 + extra_features,). This module reshapes
+    the first part into (3, grid_size, grid_size) for Conv2d processing,
+    then concatenates the extra features before the heads.
+    """
+
+    def __init__(self, grid_size: int, num_actions: int, extra_features: int = 3):
+        super().__init__()
+        self.grid_size = grid_size
+        self.grid_flat_dim = grid_size * grid_size * 3
+        self.extra_features = extra_features
+
+        # CNN feature extractor for the grid
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+        conv_out_dim = 64 * grid_size * grid_size
+
+        # fuse CNN features with extra features
+        fused_dim = conv_out_dim + extra_features
+        self.fuse = nn.Sequential(
+            nn.Linear(fused_dim, 256),
+            nn.ReLU(),
+        )
+
+        # separate heads
+        self.actor_head = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_actions),
+        )
+        self.critic_head = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+        # orthogonal initialisation
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain("relu"))
+                nn.init.constant_(m.bias, 0.0)
+        # smaller init for output heads
+        for head in [self.actor_head, self.critic_head]:
+            last = head[-1]
+            nn.init.orthogonal_(last.weight, gain=0.01)
+            nn.init.constant_(last.bias, 0.0)
+
+    def _split_obs(self, x: torch.Tensor):
+        grid_flat = x[:, : self.grid_flat_dim]
+        extra = x[:, self.grid_flat_dim :]
+        grid_2d = grid_flat.view(-1, 3, self.grid_size, self.grid_size)
+        return grid_2d, extra
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        grid_2d, extra = self._split_obs(x)
+        conv_feat = self.conv(grid_2d)
+        fused = self.fuse(torch.cat([conv_feat, extra], dim=1))
+        logits = self.actor_head(fused)
+        value = self.critic_head(fused)
+        return logits, value
+
+    def get_action(
+        self, obs: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        logits, value = self.forward(obs)
+        dist = Categorical(logits=logits)
+        action = dist.sample()
+        return action, dist.log_prob(action), value
+
+    def evaluate_actions(
+        self, obs: torch.Tensor, actions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        logits, value = self.forward(obs)
+        dist = Categorical(logits=logits)
+        return dist.log_prob(actions), dist.entropy(), value
+
+    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
+        _, value = self.forward(obs)
+        return value

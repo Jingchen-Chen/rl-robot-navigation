@@ -5,7 +5,7 @@ environment:
   obstacle_ratio: 0.15
   max_steps: 200
   render_mode: null  # Set to "human" for visualization
-  fixed_map: true   # Set to true to train on a single fixed map (easier, good for debugging)
+  fixed_map: false   # false = random maps each episode for generalization
 
 dqn:
   lr: 0.0005
@@ -26,13 +26,14 @@ ppo:
   gamma: 0.99
   gae_lambda: 0.95
   clip_epsilon: 0.2
-  entropy_coef: 0.02       # higher entropy bonus to encourage exploration
+  entropy_coef: 0.05       # start high for random-map exploration
+  entropy_coef_end: 0.005  # anneal to this value
   value_coef: 0.5
-  n_epochs: 8              # more epochs per rollout for better sample efficiency
-  batch_size: 128
-  rollout_steps: 1024
-  total_timesteps: 300000
-  eval_interval: 10000
+  n_epochs: 6              # slightly fewer epochs to reduce overfitting per rollout
+  batch_size: 256
+  rollout_steps: 2048      # longer rollouts for more complete episodes
+  total_timesteps: 1000000  # 1M steps for random-map generalization
+  eval_interval: 20000
 
 training:
   seed: 42

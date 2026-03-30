@@ -141,18 +141,24 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
+    grid_size = cfg["environment"]["grid_size"]
+    initial_lr = ppo_cfg["lr"]
+    initial_ent = ppo_cfg["entropy_coef"]
+    ent_end = ppo_cfg.get("entropy_coef_end", 0.005)
+
     agent = PPOAgent(
         state_dim=state_dim,
         action_dim=action_dim,
-        lr=ppo_cfg["lr"],
+        lr=initial_lr,
         gamma=ppo_cfg["gamma"],
         gae_lambda=ppo_cfg["gae_lambda"],
         clip_epsilon=ppo_cfg["clip_epsilon"],
-        entropy_coef=ppo_cfg["entropy_coef"],
+        entropy_coef=initial_ent,
         value_coef=ppo_cfg["value_coef"],
         n_epochs=ppo_cfg["n_epochs"],
         batch_size=ppo_cfg["batch_size"],
         device=device,
+        grid_size=grid_size,
     )
 
     best_reward = -float("inf")
@@ -166,6 +172,13 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
 
     while total_steps < total_timesteps:
         agent.buffer.reset()
+
+        # linear LR and entropy annealing
+        frac = 1.0 - total_steps / total_timesteps
+        cur_lr = initial_lr * frac
+        for pg in agent.optimizer.param_groups:
+            pg["lr"] = cur_lr
+        agent.entropy_coef = ent_end + (initial_ent - ent_end) * frac
 
         for _ in range(rollout_steps):
             action, log_prob, value = agent.select_action(state)
@@ -191,6 +204,7 @@ def train_ppo(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
 
         writer.add_scalar("Loss/Policy", p_loss, total_steps)
         writer.add_scalar("Loss/Value", v_loss, total_steps)
+        writer.add_scalar("LR", cur_lr, total_steps)
         if recent_rewards:
             avg_r = np.mean(recent_rewards)
             writer.add_scalar("Reward/Rolling20", avg_r, total_steps)

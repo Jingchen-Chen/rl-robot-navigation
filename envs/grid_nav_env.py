@@ -43,8 +43,10 @@ class GridNavEnv(gym.Env):
         self.fixed_map = fixed_map  # if True, reuse the same map across resets
 
         self.action_space = spaces.Discrete(4)
+        # 3 grid channels (flattened) + 3 relative-position features (dx, dy, dist)
+        obs_dim = grid_size * grid_size * 3 + 3
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(grid_size * grid_size * 3,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
 
         self.grid: Optional[np.ndarray] = None
@@ -200,13 +202,22 @@ class GridNavEnv(gym.Env):
     is_solvable = _bfs_reachable
 
     def _get_obs(self) -> np.ndarray:
-        """Three-channel encoding: obstacle / agent / goal planes."""
+        """Three-channel grid encoding + normalized relative position features."""
         obstacle_plane = (self.grid == 1).astype(np.float32)
         agent_plane = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         agent_plane[self.agent_pos] = 1.0
         goal_plane = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         goal_plane[self.goal_pos] = 1.0
-        return np.stack([obstacle_plane, agent_plane, goal_plane], axis=0).flatten()
+        grid_flat = np.stack([obstacle_plane, agent_plane, goal_plane], axis=0).flatten()
+
+        # relative position features (normalized to [-1, 1])
+        half = self.grid_size - 1
+        dx = (self.goal_pos[0] - self.agent_pos[0]) / max(half, 1)
+        dy = (self.goal_pos[1] - self.agent_pos[1]) / max(half, 1)
+        dist = (abs(self.goal_pos[0] - self.agent_pos[0])
+                + abs(self.goal_pos[1] - self.agent_pos[1])) / self._max_dist
+        rel_feats = np.array([dx, dy, dist], dtype=np.float32)
+        return np.concatenate([grid_flat, rel_feats])
 
     def _build_rgb(self) -> np.ndarray:
         """Build an RGB image of the current grid state."""

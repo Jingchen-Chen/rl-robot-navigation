@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 
-from networks.models import ActorCritic
+from networks.models import ActorCritic, ConvActorCritic
 from utils.rollout_buffer import RolloutBuffer
 
 
@@ -29,6 +29,7 @@ class PPOAgent:
         n_epochs: int = 4,
         batch_size: int = 64,
         device: str = "cpu",
+        grid_size: int = 0,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -39,7 +40,11 @@ class PPOAgent:
         self.batch_size = batch_size
         self.device = device
 
-        self.policy = ActorCritic(state_dim, action_dim).to(device)
+        if grid_size > 0:
+            extra_features = state_dim - grid_size * grid_size * 3
+            self.policy = ConvActorCritic(grid_size, action_dim, extra_features).to(device)
+        else:
+            self.policy = ActorCritic(state_dim, action_dim).to(device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.buffer = RolloutBuffer()
 

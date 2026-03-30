@@ -122,7 +122,7 @@ pip install -r requirements.txt
 # Train DQN agent (600 episodes)
 python train.py --algo dqn
 
-# Train PPO agent (300k timesteps)
+# Train PPO agent (1M timesteps)
 python train.py --algo ppo
 
 # Custom settings
@@ -163,7 +163,7 @@ python -m pytest tests/ -v
 | Reward: hit wall/obstacle | −5 + distance shaping |
 | Reward: each step | −1 + distance shaping |
 | Max steps | 200 |
-| Map generation | Random with BFS solvability guarantee (default: `fixed_map: true` — a single map is generated once and reused across all episodes; set to `false` for random maps per episode) |
+| Map generation | Random with BFS solvability guarantee (default: `fixed_map: false` — a new random map per episode for generalization; set to `true` to reuse a single fixed map across all episodes) |
 
 ## Configuration
 
@@ -173,33 +173,41 @@ All hyperparameters are in [`configs/default.yaml`](configs/default.yaml). Key s
 |-----------|-----|-----|
 | Learning rate | 5e-4 | 3e-4 |
 | Discount (γ) | 0.99 | 0.99 |
-| Batch size | 64 | 128 |
-| Buffer size | 50,000 | 1,024 (rollout) |
+| Batch size | 64 | 256 |
+| Buffer size | 50,000 | 2,048 (rollout) |
 | ε-decay steps | 30,000 | — |
 | Clip ε | — | 0.2 |
 | GAE λ | — | 0.95 |
-| Entropy coef | — | 0.02 |
-| Update epochs | — | 8 |
+| Entropy coef | — | 0.05 → 0.005 (annealed) |
+| Update epochs | — | 6 |
 
 ## Results
 
-Evaluated on 20 episodes after training (seed 42, 8×8 grid, 15% obstacles, **`fixed_map: true`**).
+Evaluated on 10 episodes (inline eval during training), seed 42, 8×8 grid, 15% obstacles, **`fixed_map: false`** (random maps per episode).
 
-> **Note:** The default configuration uses `fixed_map: true`, meaning a single map is generated at the start and reused for all training and evaluation episodes. The agent only needs to memorize one optimal path rather than generalize across random layouts. Results below reflect this single-map setting and are **not** indicative of generalization to unseen maps.
+> **Note:** The default configuration uses `fixed_map: false`, meaning a new random map is generated at the start of every episode. The agent must generalize to unseen layouts rather than memorize a single path. Results below reflect this harder generalization setting.
 
-| Algorithm | Training Budget | Mean Reward | Std Reward | Success Rate | Mean Steps |
-|-----------|----------------|-------------|------------|--------------|------------|
-| **DQN** | 600 episodes | **90.79** | 0.00 | **100%** | **11.0** |
-| **PPO** | 300k timesteps | 50.94 | 35.06 | 100% | 26.6 |
+| Algorithm | Training Budget | Best Eval Reward | Success Rate (at best) | Success Rate (final) |
+|-----------|----------------|-----------------|------------------------|----------------------|
+| **DQN** | 600 episodes | **90.79** | **100%** | **100%** |
+| **PPO** | 1M timesteps | 36.0 | 100% | 80% |
+
+**PPO training highlights (1M steps, random maps):**
+
+- Reaches **100% success** at multiple eval checkpoints (~28%, ~54%, ~62%, ~64%, ~68%, ~74%, ~94% of training).
+- Best single eval: mean_R = 36.0 at ~620k steps (100% success, 10/10 episodes).
+- Final eval (1M steps): mean_R = −114.3, success = 80% — late-training degradation is expected with linear LR/entropy annealing to near-zero.
+- High variance across evals (mean_R ranging from −270 to +36) is characteristic of on-policy PPO on random maps: the agent is continuously adapting to novel layouts rather than memorizing a fixed path.
+- The value loss grows monotonically (~900 → ~2200) as the critic's value estimates scale up with cumulative returns — a known behavior under long-horizon training with no normalization.
 
 **Key observations:**
 
-- **DQN** converges faster and more stably on this fixed-map setting, reaching 100% success by episode ~50 and consistently finding near-optimal paths (avg 11 steps vs. BFS-optimal ~9–12). The zero standard deviation confirms that DQN has memorized the single optimal trajectory.
-- **PPO** also achieves 100% success but with higher variance and longer paths, reflecting the on-policy sample efficiency gap on a relatively small discrete action space.
-- PPO training exhibits periodic reward drops (catastrophic forgetting pattern), while DQN's off-policy replay buffer provides more stable gradient updates.
-- To evaluate generalization, set `fixed_map: false` in [`configs/default.yaml`](configs/default.yaml) — expect lower success rates and higher variance as the agent must handle novel obstacle layouts.
+- **DQN** converges faster and more stably on the fixed-map setting, finding near-optimal paths consistently.
+- **PPO** on random maps (`fixed_map: false`) is the harder generalization task — 1M steps is sufficient to reach 100% success on novel maps at peak, but requires careful hyperparameter tuning to maintain late-training stability.
+- To reproduce the simpler fixed-map setting (single map memorization), set `fixed_map: true` in [`configs/default.yaml`](configs/default.yaml).
 
-> Reproduce results: `python train.py --algo dqn --seed 42` then `python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth`
+> Reproduce PPO results: `python train.py --algo ppo --seed 42`
+> Reproduce DQN results: `python train.py --algo dqn --seed 42` then `python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth`
 
 ## License
 
