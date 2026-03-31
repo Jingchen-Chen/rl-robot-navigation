@@ -26,12 +26,20 @@ class QNetwork(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_size, 256),
             nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_actions),
+            nn.Linear(128, num_actions),
         )
+        # orthogonal init for stable early learning
+        gain = nn.init.calculate_gain("relu")
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=gain)
+                nn.init.constant_(m.bias, 0.0)
+        # smaller init on the output layer
+        nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -130,6 +138,79 @@ class ActorCritic(nn.Module):
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         _, value = self.forward(obs)
         return value
+
+
+class DuelingConvQNetwork(nn.Module):
+    """Dueling CNN Q-Network that processes the grid spatially.
+
+    Uses the same observation split as ConvActorCritic: the first
+    grid_size*grid_size*3 elements are reshaped into (3, H, W) for
+    Conv2d; remaining elements are extra features (dx, dy, dist).
+    Dueling architecture decomposes Q = V(s) + A(s,a) - mean(A).
+    """
+
+    def __init__(self, grid_size: int, num_actions: int, extra_features: int = 3):
+        super().__init__()
+        self.grid_size = grid_size
+        self.grid_flat_dim = grid_size * grid_size * 3
+        self.extra_features = extra_features
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+        conv_out_dim = 64 * grid_size * grid_size
+
+        fused_dim = conv_out_dim + extra_features
+        self.fuse = nn.Sequential(
+            nn.Linear(fused_dim, 256),
+            nn.ReLU(),
+        )
+
+        # value stream
+        self.value_stream = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        # advantage stream
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_actions),
+        )
+
+        # orthogonal init
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain("relu"))
+                nn.init.constant_(m.bias, 0.0)
+        # smaller init on output layers
+        for stream in [self.value_stream, self.advantage_stream]:
+            last = stream[-1]
+            nn.init.orthogonal_(last.weight, gain=0.01)
+            nn.init.constant_(last.bias, 0.0)
+
+    def _split_obs(self, x: torch.Tensor):
+        grid_flat = x[:, : self.grid_flat_dim]
+        extra = x[:, self.grid_flat_dim :]
+        grid_2d = grid_flat.view(-1, 3, self.grid_size, self.grid_size)
+        return grid_2d, extra
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        grid_2d, extra = self._split_obs(x)
+        conv_feat = self.conv(grid_2d)
+        fused = self.fuse(torch.cat([conv_feat, extra], dim=1))
+        value = self.value_stream(fused)
+        advantage = self.advantage_stream(fused)
+        # dueling aggregation: Q = V + A - mean(A)
+        q = value + advantage - advantage.mean(dim=1, keepdim=True)
+        return q
 
 
 class ConvActorCritic(nn.Module):
