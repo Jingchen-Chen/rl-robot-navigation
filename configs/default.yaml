@@ -8,18 +8,21 @@ environment:
   fixed_map: false   # false = random maps each episode for generalization
 
 dqn:
-  lr: 0.0005
+  lr: 0.0001
   gamma: 0.99
-  buffer_size: 50000
-  batch_size: 64
-  tau: 0.01          # faster soft-update for quicker target alignment
+  buffer_size: 200000
+  batch_size: 128
+  tau: 0.001
   eps_start: 1.0
   eps_end: 0.05
-  eps_decay_steps: 30000   # slower decay: agent explores more before going greedy
-  total_episodes: 600
-  eval_interval: 50
-  warmup_steps: 2000       # collect more diverse experience before first update
-  target_update_freq: 10
+  eps_decay_steps: 400000  # decay over first ~40% of training steps
+  total_timesteps: 1000000 # match PPO budget for fair comparison
+  eval_interval: 20000     # evaluate every N steps
+  warmup_steps: 5000
+  updates_per_step: 1      # gradient updates per training call
+  train_every: 4            # only train every N env steps (reduces wall-clock with CNN)
+  double_dqn: true
+  target_update_interval: 2000  # hard target update every N gradient steps
 
 ppo:
   lr: 0.0003
