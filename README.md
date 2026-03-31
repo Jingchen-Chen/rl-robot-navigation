@@ -1,112 +1,62 @@
-# 🤖 RL Robot Navigation
+# RL Robot Navigation
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+A reinforcement learning project for training autonomous navigation agents in a 2D grid environment. Implements **DQN** (with Double DQN + Dueling architecture) and **PPO** from scratch using PyTorch.
 
-Deep Reinforcement Learning for 2D Robot Navigation using **DQN** and **PPO**.
+## Environment
 
-A mobile robot learns to navigate from a random start to a goal in a grid world with obstacles.
+The agent navigates an 8×8 grid with randomly placed obstacles (15% density). The goal is to reach the target while avoiding obstacles and walls within a 200-step budget.
 
-## Overview
+| Property | Value |
+|---|---|
+| Grid size | 8×8 |
+| Obstacle ratio | 15% |
+| Max steps/episode | 200 |
+| Actions | 4 (up, down, left, right) |
 
-This project implements and compares two Deep RL algorithms for autonomous navigation:
+**Reward shaping:** step penalty, collision penalty, and a large positive reward for reaching the goal.
 
-| Feature | Details |
-|---------|---------|
-| **Environment** | Custom Gymnasium grid world with random obstacles and BFS-verified solvability |
-| **DQN** | Experience replay, target network, linear ε-decay, soft updates |
-| **PPO** | Shared actor-critic, GAE, clipped surrogate objective, entropy bonus |
-| **Logging** | TensorBoard integration for loss, reward, and success rate |
-| **Visualization** | Episode rendering (GIF), Q-value heatmaps, training curves |
+## Algorithms
+
+### DQN
+- Double DQN with Dueling Convolutional Q-Network
+- Experience replay buffer (100K transitions)
+- Soft target network updates (τ = 0.005)
+- ε-greedy exploration with linear decay
+
+### PPO
+- Clipped surrogate objective
+- Rollout buffer (2048 steps)
+- Generalized Advantage Estimation (GAE)
+
+## Results
+
+| Algorithm | Best Eval Reward | Final Success Rate | Steps |
+|---|---|---|---|
+| **DQN** | **96.8** | **100%** | 1,000,000 |
+| PPO | 36.0 | 80% | 1,000,000 |
+
+DQN consistently converges to 100% success rate; PPO exhibits higher variance but still learns effective policies.
 
 ## Project Structure
 
 ```
 rl-robot-navigation/
-├── configs/
-│   └── default.yaml          # Hyperparameter configuration
-├── envs/
-│   ├── __init__.py
-│   └── grid_nav_env.py       # Gymnasium-compatible grid navigation environment
-├── networks/
-│   ├── __init__.py
-│   └── models.py             # QNetwork, ActorCritic, PolicyNetwork, ValueNetwork
 ├── agents/
-│   ├── __init__.py
-│   ├── dqn.py                # DQN agent with replay buffer
-│   └── ppo.py                # PPO agent with rollout buffer
-├── utils/
-│   ├── __init__.py
-│   ├── replay_buffer.py      # Fixed-size experience replay (NumPy arrays)
-│   ├── rollout_buffer.py     # Trajectory buffer with GAE computation
-│   └── visualization.py      # Plotting and animation utilities
-├── tests/
-│   └── test_env.py           # Unit tests for the environment
-├── train.py                  # Main training entry point
-├── evaluate.py               # Model evaluation and GIF export
-├── requirements.txt
-├── setup.py
-└── LICENSE
+│   ├── dqn.py            # DQN agent (Double DQN + Dueling network)
+│   └── ppo.py            # PPO agent
+├── envs/
+│   └── grid_nav_env.py   # 2D grid navigation environment (Gymnasium)
+├── networks/
+│   └── models.py         # Q-network and policy network architectures
+├── utils/                # Replay buffer, logging helpers
+├── configs/
+│   └── default.yaml      # Hyperparameter configuration
+├── train.py              # Training entry point
+├── evaluate.py           # Evaluation & GIF rendering
+└── results/              # Saved evaluation GIFs
 ```
 
-## Algorithm Details
-
-### Deep Q-Network (DQN)
-
-DQN approximates the optimal action-value function $Q^*(s, a)$ using a neural network.
-
-**Bellman optimality target:**
-
-$$y_i = r + \gamma \max_{a'} Q(s', a'; \theta^-)$$
-
-**Loss function (MSE on TD error):**
-
-$$\mathcal{L}(\theta) = \mathbb{E}\left[(y_i - Q(s, a; \theta))^2\right]$$
-
-Key techniques: experience replay buffer, target network (soft update $\tau = 0.01$), linear $\varepsilon$-greedy decay.
-
-### Proximal Policy Optimization (PPO)
-
-PPO optimizes a clipped surrogate objective to ensure stable policy updates.
-
-**Clipped surrogate objective:**
-
-$$L^{\text{CLIP}}(\theta) = \hat{\mathbb{E}}_t \left[\min\left(r_t(\theta)\hat{A}_t,\; \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
-
-where $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_\text{old}}(a_t|s_t)}$.
-
-**Generalized Advantage Estimation (GAE):**
-
-$$\hat{A}_t = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────┐
-│                     Agent (DQN / PPO)                  │
-│  ┌──────────────┐   action   ┌──────────────────────┐  │
-│  │ Neural Net   │ ────────►  │ Replay / Rollout     │  │
-│  │ (Q / AC)     │ ◄──────── │ Buffer               │  │
-│  └──────┬───────┘   batch   └──────────────────────┘  │
-│         │ state                                        │
-└─────────┼──────────────────────────────────────────────┘
-          │ action ▼          ▲ (state, reward, done)
-┌─────────┴──────────────────────────────────────────────┐
-│                   GridNavEnv                           │
-│  ┌─────┬─────┬─────┬─────┐                            │
-│  │  S  │     │  #  │     │   S = Start (agent)        │
-│  ├─────┼─────┼─────┼─────┤   G = Goal                 │
-│  │     │  #  │     │     │   # = Obstacle              │
-│  ├─────┼─────┼─────┼─────┤                            │
-│  │  #  │     │     │  #  │   Actions: ↑ ↓ ← →         │
-│  ├─────┼─────┼─────┼─────┤   Obs: 3-channel flat vec  │
-│  │     │     │  #  │  G  │   Rewards: +100, -5, -1    │
-│  └─────┴─────┴─────┴─────┘                            │
-└────────────────────────────────────────────────────────┘
-```
-
-## Installation
+## Setup
 
 ```bash
 git clone https://github.com/Jingchen-Chen/rl-robot-navigation.git
@@ -114,106 +64,61 @@ cd rl-robot-navigation
 pip install -r requirements.txt
 ```
 
-## Quick Start
+> **Apple Silicon:** Training automatically uses MPS when available. CUDA is used on Linux/Windows with a compatible GPU. Falls back to CPU otherwise.
 
-### Training
-
-```bash
-# Train DQN agent (600 episodes)
-python train.py --algo dqn
-
-# Train PPO agent (1M timesteps)
-python train.py --algo ppo
-
-# Custom settings
-python train.py --algo dqn --seed 123 --episodes 2000 --device cuda
-```
-
-### Evaluation
+## Training
 
 ```bash
-# Evaluate trained DQN model
-python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth --render
+# Train DQN (default)
+python train.py --algo dqn --seed 42
 
-# Evaluate PPO with trajectory saving
-python evaluate.py --algo ppo --model_path checkpoints/best_ppo.pth --save_trajectories
+# Train PPO
+python train.py --algo ppo --seed 42
 ```
 
-### TensorBoard
+Training logs are written to `runs/` and viewable with TensorBoard:
 
 ```bash
 tensorboard --logdir runs/
 ```
 
-### Tests
+Checkpoints are saved to `checkpoints/`.
+
+## Evaluation
 
 ```bash
-python -m pytest tests/ -v
+# Evaluate a trained DQN agent (renders GIFs to results/)
+python evaluate.py --algo dqn
+
+# Evaluate PPO
+python evaluate.py --algo ppo
 ```
-
-## Environment Details
-
-| Property | Value |
-|----------|-------|
-| Grid size | 8×8 (configurable) |
-| Obstacle ratio | 15% (configurable) |
-| Observation | 3-channel flattened vector (192-dim): obstacle / agent / goal planes |
-| Actions | Discrete(4): Up, Down, Left, Right |
-| Reward: reach goal | +100 |
-| Reward: hit wall/obstacle | −5 + distance shaping |
-| Reward: each step | −1 + distance shaping |
-| Max steps | 200 |
-| Map generation | Random with BFS solvability guarantee (default: `fixed_map: false` — a new random map per episode for generalization; set to `true` to reuse a single fixed map across all episodes) |
 
 ## Configuration
 
-All hyperparameters are in [`configs/default.yaml`](configs/default.yaml). Key settings:
+Edit `configs/default.yaml` to adjust hyperparameters:
 
-| Parameter | DQN | PPO |
-|-----------|-----|-----|
-| Learning rate | 5e-4 | 3e-4 |
-| Discount (γ) | 0.99 | 0.99 |
-| Batch size | 64 | 256 |
-| Buffer size | 50,000 | 2,048 (rollout) |
-| ε-decay steps | 30,000 | — |
-| Clip ε | — | 0.2 |
-| GAE λ | — | 0.95 |
-| Entropy coef | — | 0.05 → 0.005 (annealed) |
-| Update epochs | — | 6 |
+```yaml
+environment:
+  grid_size: 8
+  obstacle_ratio: 0.15
+  max_steps: 200
 
-## Results
+dqn:
+  lr: 1e-4
+  gamma: 0.99
+  buffer_size: 100000
+  batch_size: 64
+  ...
+```
 
-Evaluated on 10 episodes (inline eval during training), seed 42, 8×8 grid, 15% obstacles, **`fixed_map: false`** (random maps per episode).
+## Requirements
 
-> **Note:** The default configuration uses `fixed_map: false`, meaning a new random map is generated at the start of every episode. The agent must generalize to unseen layouts rather than memorize a single path. Results below reflect this harder generalization setting.
-
-| Algorithm | Training Budget | Best Eval Reward | Success Rate (at best) | Success Rate (final) |
-|-----------|----------------|-----------------|------------------------|----------------------|
-| **DQN** | 600 episodes | **90.79** | **100%** | **100%** |
-| **PPO** | 1M timesteps | 36.0 | 100% | 80% |
-
-**PPO training highlights (1M steps, random maps):**
-
-- Reaches **100% success** at multiple eval checkpoints (~28%, ~54%, ~62%, ~64%, ~68%, ~74%, ~94% of training).
-- Best single eval: mean_R = 36.0 at ~620k steps (100% success, 10/10 episodes).
-- Final eval (1M steps): mean_R = −114.3, success = 80% — late-training degradation is expected with linear LR/entropy annealing to near-zero.
-- High variance across evals (mean_R ranging from −270 to +36) is characteristic of on-policy PPO on random maps: the agent is continuously adapting to novel layouts rather than memorizing a fixed path.
-- The value loss grows monotonically (~900 → ~2200) as the critic's value estimates scale up with cumulative returns — a known behavior under long-horizon training with no normalization.
-
-**Key observations:**
-
-- **DQN** converges faster and more stably on the fixed-map setting, finding near-optimal paths consistently.
-- **PPO** on random maps (`fixed_map: false`) is the harder generalization task — 1M steps is sufficient to reach 100% success on novel maps at peak, but requires careful hyperparameter tuning to maintain late-training stability.
-- To reproduce the simpler fixed-map setting (single map memorization), set `fixed_map: true` in [`configs/default.yaml`](configs/default.yaml).
-
-> Reproduce PPO results: `python train.py --algo ppo --seed 42`
-> Reproduce DQN results: `python train.py --algo dqn --seed 42` then `python evaluate.py --algo dqn --model_path checkpoints/best_dqn.pth`
+- Python 3.9+
+- PyTorch 2.0+
+- Gymnasium 0.29+
+- See `requirements.txt` for full list
 
 ## License
 
-[MIT](LICENSE) © 2026 Jingchen Chen
-
-## Acknowledgments
-
-- [Gymnasium](https://gymnasium.farama.org/) — RL environment toolkit
-- [PyTorch](https://pytorch.org/) — deep learning framework
+MIT
