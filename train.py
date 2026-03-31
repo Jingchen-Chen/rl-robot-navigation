@@ -53,12 +53,17 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
     dqn_cfg = cfg["dqn"]
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
-    warmup = dqn_cfg.get("warmup_steps", 2000)
+    warmup = dqn_cfg.get("warmup_steps", 5000)
+    total_timesteps = int(dqn_cfg.get("total_timesteps", 1_000_000))
+    eval_interval = int(dqn_cfg.get("eval_interval", 20_000))
+    train_every = dqn_cfg.get("train_every", 4)
+    grid_size = cfg["environment"]["grid_size"]
+    initial_lr = dqn_cfg["lr"]
 
     agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
-        lr=dqn_cfg["lr"],
+        lr=initial_lr,
         gamma=dqn_cfg["gamma"],
         buffer_size=int(dqn_cfg["buffer_size"]),
         batch_size=dqn_cfg["batch_size"],
@@ -66,64 +71,79 @@ def train_dqn(env: GridNavEnv, cfg: dict, device: str, writer: SummaryWriter):
         eps_start=dqn_cfg["eps_start"],
         eps_end=dqn_cfg["eps_end"],
         eps_decay_steps=dqn_cfg["eps_decay_steps"],
+        double_dqn=dqn_cfg.get("double_dqn", True),
+        updates_per_step=dqn_cfg.get("updates_per_step", 1),
+        target_update_interval=dqn_cfg.get("target_update_interval", 0),
         device=device,
+        grid_size=grid_size,
     )
 
     best_reward = -float("inf")
     total_steps = 0
+    ep = 0
     recent_rewards = []
+    last_eval_step = 0
 
     seed = cfg["training"]["seed"]
-    for ep in range(1, dqn_cfg["total_episodes"] + 1):
-        # 只有在第一个 episode 时传入 seed 以初始化固定的地图
-        if ep == 1:
-            state, _ = env.reset(seed=seed)
-        else:
+    state, _ = env.reset(seed=seed)
+    ep_reward = 0.0
+    ep_steps = 0
+    ep_losses = []
+
+    while total_steps < total_timesteps:
+        action = agent.select_action(state)
+        next_state, reward, done, truncated, _ = env.step(action)
+        agent.store_transition(state, action, reward, next_state, done or truncated)
+        state = next_state
+        ep_reward += reward
+        ep_steps += 1
+        total_steps += 1
+
+        if total_steps > warmup and total_steps % train_every == 0:
+            # linear LR annealing (same as PPO)
+            frac = 1.0 - total_steps / total_timesteps
+            cur_lr = initial_lr * max(frac, 0.1)
+            for pg in agent.optimizer.param_groups:
+                pg["lr"] = cur_lr
+
+            loss = agent.update()
+            if loss is not None:
+                ep_losses.append(loss)
+
+        if done or truncated:
+            ep += 1
+            recent_rewards.append(ep_reward)
+            if len(recent_rewards) > 50:
+                recent_rewards.pop(0)
+            avg_reward = np.mean(recent_rewards)
+
+            writer.add_scalar("Reward/Episode", ep_reward, total_steps)
+            writer.add_scalar("Reward/Rolling50", avg_reward, total_steps)
+            writer.add_scalar("Steps/Episode", ep_steps, total_steps)
+            writer.add_scalar("Epsilon", agent.epsilon, total_steps)
+            if ep_losses:
+                writer.add_scalar("Loss/DQN", np.mean(ep_losses), total_steps)
+
+            if ep % 10 == 0:
+                avg_loss = f"{np.mean(ep_losses):.4f}" if ep_losses else "warmup"
+                pct = total_steps / total_timesteps * 100
+                print(
+                    f"[DQN] Ep {ep:>4d}  ({pct:4.1f}%)  "
+                    f"R={ep_reward:>7.1f}  Avg50={avg_reward:>7.1f}  "
+                    f"Steps={ep_steps:>4d}  eps={agent.epsilon:.3f}  loss={avg_loss}"
+                )
+
+            ep_reward = 0.0
+            ep_steps = 0
+            ep_losses = []
             state, _ = env.reset()
-        ep_reward = 0.0
-        ep_steps = 0
-        ep_losses = []
-        done = truncated = False
 
-        while not (done or truncated):
-            action = agent.select_action(state)
-            next_state, reward, done, truncated, _ = env.step(action)
-            agent.store_transition(state, action, reward, next_state, done)
-            state = next_state
-            ep_reward += reward
-            ep_steps += 1
-            total_steps += 1
-
-            if total_steps > warmup:
-                loss = agent.update()
-                if loss is not None:
-                    ep_losses.append(loss)
-
-        recent_rewards.append(ep_reward)
-        if len(recent_rewards) > 50:
-            recent_rewards.pop(0)
-        avg_reward = np.mean(recent_rewards)
-
-        writer.add_scalar("Reward/Episode", ep_reward, ep)
-        writer.add_scalar("Reward/Rolling50", avg_reward, ep)
-        writer.add_scalar("Steps/Episode", ep_steps, ep)
-        writer.add_scalar("Epsilon", agent.epsilon, ep)
-        if ep_losses:
-            writer.add_scalar("Loss/DQN", np.mean(ep_losses), ep)
-
-        if ep % 10 == 0:
-            avg_loss = f"{np.mean(ep_losses):.4f}" if ep_losses else "warmup"
-            print(
-                f"[DQN] Ep {ep:>4d}/{dqn_cfg['total_episodes']}  "
-                f"R={ep_reward:>7.1f}  Avg50={avg_reward:>7.1f}  "
-                f"Steps={ep_steps:>4d}  eps={agent.epsilon:.3f}  loss={avg_loss}"
-            )
-
-        if ep % dqn_cfg["eval_interval"] == 0:
+        if total_steps - last_eval_step >= eval_interval:
+            last_eval_step = total_steps
             mean_r, suc = evaluate(env, agent, "dqn")
-            print(f"       ➜ Eval  mean_R={mean_r:.1f}  success={suc*100:.0f}%")
-            writer.add_scalar("Reward/Eval", mean_r, ep)
-            writer.add_scalar("Success/Eval", suc, ep)
+            print(f"       ➜ Eval [{total_steps:>7d}]  mean_R={mean_r:.1f}  success={suc*100:.0f}%")
+            writer.add_scalar("Reward/Eval", mean_r, total_steps)
+            writer.add_scalar("Success/Eval", suc, total_steps)
             if mean_r > best_reward:
                 best_reward = mean_r
                 agent.save(os.path.join(cfg["training"]["save_dir"], "best_dqn.pth"))
@@ -239,7 +259,7 @@ def main():
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--episodes", type=int, default=None, help="DQN episodes override")
+    parser.add_argument("--episodes", type=int, default=None, help="DQN total_timesteps override (legacy name)")
     parser.add_argument("--timesteps", type=int, default=None, help="PPO timesteps override")
     args = parser.parse_args()
 
@@ -249,7 +269,7 @@ def main():
     if args.seed is not None:
         cfg["training"]["seed"] = args.seed
     if args.episodes is not None:
-        cfg["dqn"]["total_episodes"] = args.episodes
+        cfg["dqn"]["total_timesteps"] = args.episodes
     if args.timesteps is not None:
         cfg["ppo"]["total_timesteps"] = args.timesteps
 
